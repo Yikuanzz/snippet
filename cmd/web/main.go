@@ -1,19 +1,31 @@
 package main
 
 import (
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"text/template"
+	"time"
 
+	"github.com/alexedwards/scs/mysqlstore"
+	"github.com/alexedwards/scs/v2"
+	"github.com/go-playground/form/v4"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
+	"github.com/yikuanzz/snippet/internal/models"
 )
 
 type application struct {
-	infoLog  *log.Logger
-	errorLog *log.Logger
+	infoLog        *log.Logger
+	errorLog       *log.Logger
+	snippets       *models.SnippetModel
+	users          *models.UserModel
+	templateCache  map[string]*template.Template
+	formDecoder    *form.Decoder
+	sessionManager *scs.SessionManager
 }
 
 func main() {
@@ -41,22 +53,51 @@ func main() {
 	}
 	defer db.Close()
 
+	// Initialize template cache
+	templateCache, err := newTemplateCache()
+	if err != nil {
+		errorLog.Fatal(err)
+	}
+
+	// Initialize form decoder
+	formDecoder := form.NewDecoder()
+
+	// Initialize session manager
+	sessionManager := scs.New()
+	sessionManager.Store = mysqlstore.New(db)
+	sessionManager.Lifetime = 12 * time.Hour
+	sessionManager.Cookie.Secure = true
+
 	// Application
 	app := &application{
-		infoLog:  infoLog,
-		errorLog: errorLog,
+		infoLog:        infoLog,
+		errorLog:       errorLog,
+		snippets:       &models.SnippetModel{DB: db},
+		users:          &models.UserModel{DB: db},
+		templateCache:  templateCache,
+		formDecoder:    formDecoder,
+		sessionManager: sessionManager,
+	}
+
+	// Initialize a tls.Config
+	tlsConfig := &tls.Config{
+		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
 	}
 
 	// Create http server
 	srv := &http.Server{
-		Addr:     addr,
-		ErrorLog: errorLog,
-		Handler:  app.routes(),
+		Addr:         addr,
+		ErrorLog:     errorLog,
+		Handler:      app.routes(),
+		TLSConfig:    tlsConfig,
+		IdleTimeout:  time.Minute,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
 	}
 
 	// Run http server
 	infoLog.Printf("Starting server on %s", addr)
-	err = srv.ListenAndServe()
+	err = srv.ListenAndServeTLS("tls/cert.pem", "tls/key.pem")
 	errorLog.Fatal(err)
 }
 
